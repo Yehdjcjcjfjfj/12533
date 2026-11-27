@@ -1,6 +1,9 @@
 // robrun.cpp - ESP + silent aim + menu for ROB RUN
 // external build:  cl /DROBRUN_INTERNAL=0 ...
 // internal build:  cl /DROBRUN_INTERNAL=1 /LD ...
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #include <windows.h>
 #include <tlhelp32.h>
 #include <cmath>
