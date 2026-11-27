@@ -88,11 +88,19 @@ static void save_cfg() {
 }
 static void load_cfg() {
     FILE* f = nullptr; fopen_s(&f, "robrun.ini", "r"); if (!f) return;
-    fscanf_s(f, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d", &cfg.esp, &cfg.box, &cfg.name, &cfg.dist,
-        &cfg.health, &cfg.loot, &cfg.container, &cfg.door, &cfg.car, &cfg.heli, &cfg.hideobj,
-        &cfg.crosshair, &cfg.fovCircle, &cfg.streamproof);
-    fscanf_s(f, "%d %d %d %f %f %f %f %f %f %f %f", &cfg.silent, &cfg.mouseAim, &cfg.aimKey,
-        &cfg.fov, &cfg.aimFov, &cfg.aimDist, &cfg.smooth, &cfg.playerDist, &cfg.worldDist, &cfg.eye, &cfg.bone);
+    int b[14]{};
+    if (fscanf_s(f, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+        &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &b[6],
+        &b[7], &b[8], &b[9], &b[10], &b[11], &b[12], &b[13]) == 14) {
+        cfg.esp = b[0]; cfg.box = b[1]; cfg.name = b[2]; cfg.dist = b[3]; cfg.health = b[4];
+        cfg.loot = b[5]; cfg.container = b[6]; cfg.door = b[7]; cfg.car = b[8]; cfg.heli = b[9];
+        cfg.hideobj = b[10]; cfg.crosshair = b[11]; cfg.fovCircle = b[12]; cfg.streamproof = b[13];
+    }
+    int si = 0, ma = 0, key = VK_XBUTTON1;
+    fscanf_s(f, "%d %d %d", &si, &ma, &key);
+    cfg.silent = si != 0; cfg.mouseAim = ma != 0; cfg.aimKey = key;
+    fscanf_s(f, "%f %f %f %f %f %f %f %f", &cfg.fov, &cfg.aimFov, &cfg.aimDist,
+        &cfg.smooth, &cfg.playerDist, &cfg.worldDist, &cfg.eye, &cfg.bone);
     fclose(f);
 }
 
