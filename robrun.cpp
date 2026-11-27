@@ -1,13 +1,6 @@
-// robrun.cpp - ESP + silent aim + menu for ROB RUN
-// external build:  cl /DROBRUN_INTERNAL=0 ...
-// internal build:  cl /DROBRUN_INTERNAL=1 /LD ...
-#define NOMINMAX
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <windows.h>
-#include <tlhelp32.h>
-#include <cmath>
+// robrun.cpp - ESP + silent aim for ROB RUN. External (exe) and internal (dll).
 #include <cstdio>
+#include <cmath>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -15,19 +8,24 @@
 #include <algorithm>
 #include <chrono>
 
-#pragma comment(lib, "user32.lib")
-#pragma comment(lib, "gdi32.lib")
-
 #ifndef ROBRUN_INTERNAL
 #define ROBRUN_INTERNAL 0
 #endif
+
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winternl.h>
+#include <tlhelp32.h>
+
+#pragma comment(lib, "user32.lib")
+#pragma comment(lib, "gdi32.lib")
 
 namespace offs {
     constexpr uintptr_t GameObjectManager  = 0x2230768;
     constexpr uintptr_t Updater_Entities   = 0x18;
     constexpr uintptr_t Updater_Battle     = 0x70;
     constexpr uintptr_t Updater_Views      = 0x110;
-    constexpr uintptr_t Battle_Entities    = 0x90;
     constexpr uintptr_t Battle_Camera      = 0x358;
     constexpr uintptr_t Battle_AimTarget   = 0x198;
     constexpr uintptr_t Battle_World       = 0x518;
@@ -68,7 +66,7 @@ namespace offs {
 struct Vec3 { float x, y, z; };
 
 struct Config {
-    bool esp = true, box = true, name = true, dist = true, health = true;
+    bool esp = true, box = true, name = true, dist = true;
     bool loot = true, container = true, door = false, car = true, heli = true, hideobj = false;
     bool crosshair = true, fovCircle = true, streamproof = true;
     bool silent = false, mouseAim = false;
@@ -79,8 +77,8 @@ struct Config {
 
 static void save_cfg() {
     FILE* f = nullptr; fopen_s(&f, "robrun.ini", "w"); if (!f) return;
-    fprintf(f, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d\n", cfg.esp, cfg.box, cfg.name, cfg.dist,
-        cfg.health, cfg.loot, cfg.container, cfg.door, cfg.car, cfg.heli, cfg.hideobj,
+    fprintf(f, "%d %d %d %d %d %d %d %d %d %d %d %d %d\n", cfg.esp, cfg.box, cfg.name, cfg.dist,
+        cfg.loot, cfg.container, cfg.door, cfg.car, cfg.heli, cfg.hideobj,
         cfg.crosshair, cfg.fovCircle, cfg.streamproof);
     fprintf(f, "%d %d %d %f %f %f %f %f %f %f %f\n", cfg.silent, cfg.mouseAim, cfg.aimKey,
         cfg.fov, cfg.aimFov, cfg.aimDist, cfg.smooth, cfg.playerDist, cfg.worldDist, cfg.eye, cfg.bone);
@@ -88,13 +86,13 @@ static void save_cfg() {
 }
 static void load_cfg() {
     FILE* f = nullptr; fopen_s(&f, "robrun.ini", "r"); if (!f) return;
-    int b[14]{};
-    if (fscanf_s(f, "%d %d %d %d %d %d %d %d %d %d %d %d %d %d",
+    int b[13]{};
+    if (fscanf_s(f, "%d %d %d %d %d %d %d %d %d %d %d %d %d",
         &b[0], &b[1], &b[2], &b[3], &b[4], &b[5], &b[6],
-        &b[7], &b[8], &b[9], &b[10], &b[11], &b[12], &b[13]) == 14) {
-        cfg.esp = b[0]; cfg.box = b[1]; cfg.name = b[2]; cfg.dist = b[3]; cfg.health = b[4];
-        cfg.loot = b[5]; cfg.container = b[6]; cfg.door = b[7]; cfg.car = b[8]; cfg.heli = b[9];
-        cfg.hideobj = b[10]; cfg.crosshair = b[11]; cfg.fovCircle = b[12]; cfg.streamproof = b[13];
+        &b[7], &b[8], &b[9], &b[10], &b[11], &b[12]) == 13) {
+        cfg.esp = b[0]; cfg.box = b[1]; cfg.name = b[2]; cfg.dist = b[3]; cfg.loot = b[4];
+        cfg.container = b[5]; cfg.door = b[6]; cfg.car = b[7]; cfg.heli = b[8];
+        cfg.hideobj = b[9]; cfg.crosshair = b[10]; cfg.fovCircle = b[11]; cfg.streamproof = b[12];
     }
     int si = 0, ma = 0, key = VK_XBUTTON1;
     fscanf_s(f, "%d %d %d", &si, &ma, &key);
@@ -104,66 +102,84 @@ static void load_cfg() {
     fclose(f);
 }
 
-// ------------------------------------------------------------- memory layer
-static DWORD g_pid = 0;
+// ---------------------------------------------------------------- memory
+static HANDLE g_proc = nullptr;
 static uintptr_t g_game = 0, g_unity = 0;
 static bool g_run = true, g_menu = false;
-static HINSTANCE g_self = nullptr;
-#if !ROBRUN_INTERNAL
-static HANDLE g_proc = nullptr;
-#endif
+static int g_fails = 0;
+static int g_w, g_h;
 
-static bool vread(uintptr_t a, void* buf, size_t n) {
+static bool rd_buf(uintptr_t a, void* b, size_t n) {
     if (!a) return false;
 #if ROBRUN_INTERNAL
-    __try { memcpy(buf, (void*)a, n); return true; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    __try { memcpy(b, (void*)a, n); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { ++g_fails; return false; }
 #else
-    return ReadProcessMemory(g_proc, (LPCVOID)a, buf, n, nullptr) != 0;
+    if (!ReadProcessMemory(g_proc, (LPCVOID)a, b, n, nullptr)) { ++g_fails; return false; }
 #endif
+    g_fails = 0; return true;
 }
-static bool vwrite(uintptr_t a, const void* buf, size_t n) {
-    if (!a) return false;
-#if ROBRUN_INTERNAL
-    __try { memcpy((void*)a, buf, n); return true; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-#else
-    return WriteProcessMemory(g_proc, (LPVOID)a, buf, n, nullptr) != 0;
-#endif
-}
-
-template <class T> static bool rd(uintptr_t a, T& o) { return vread(a, &o, sizeof(T)); }
+template <class T> static bool rd(uintptr_t a, T& o) { return rd_buf(a, &o, sizeof(T)); }
 template <class T> static T rdv(uintptr_t a) { T v{}; rd(a, v); return v; }
-template <class T> static void wr(uintptr_t a, T v) { vwrite(a, &v, sizeof(T)); }
+template <class T> static void wr(uintptr_t a, T v) {
+    if (!a) return;
+#if ROBRUN_INTERNAL
+    __try { memcpy((void*)a, &v, sizeof(T)); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+#else
+    WriteProcessMemory(g_proc, (LPVOID)a, &v, sizeof(T), nullptr);
+#endif
+}
 
 static bool plausible(const Vec3& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z)
         && fabsf(v.x) < 100000.f && fabsf(v.y) < 100000.f;
 }
 
-static uintptr_t module_base(const wchar_t* n) {
+static uintptr_t module_base(const wchar_t* name) {
 #if ROBRUN_INTERNAL
-    char a[64]{}; WideCharToMultiByte(CP_ACP, 0, n, -1, a, 63, nullptr, nullptr);
+    char a[64]{}; WideCharToMultiByte(CP_ACP, 0, name, -1, a, 63, nullptr, nullptr);
     return (uintptr_t)GetModuleHandleA(a);
 #else
-    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, g_pid);
-    if (s == INVALID_HANDLE_VALUE) return 0;
-    MODULEENTRY32W me{ sizeof(me) }; uintptr_t out = 0;
-    if (Module32FirstW(s, &me)) do { if (!_wcsicmp(me.szModule, n)) { out = (uintptr_t)me.modBaseAddr; break; } } while (Module32NextW(s, &me));
-    CloseHandle(s); return out;
+    using qip_t = NTSTATUS(NTAPI*)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    static qip_t qip = nullptr;
+    if (!qip) qip = (qip_t)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationProcess");
+    if (!qip) return 0;
+    PROCESS_BASIC_INFORMATION pbi{};
+    if (qip(g_proc, 0, &pbi, sizeof(pbi), nullptr) < 0 || !pbi.PebBaseAddress) return 0;
+    uintptr_t ldr = rdv<uintptr_t>((uintptr_t)pbi.PebBaseAddress + 0x18);
+    if (!ldr) return 0;
+    uintptr_t head = ldr + 0x10, cur = rdv<uintptr_t>(head);
+    for (int i = 0; cur && cur != head && i < 512; ++i) {
+        uintptr_t base = rdv<uintptr_t>(cur + 0x20);
+        USHORT len = rdv<USHORT>(cur + 0x48);
+        uintptr_t buf = rdv<uintptr_t>(cur + 0x50);
+        if (base && len && len < 260 && buf) {
+            wchar_t w[260]{};
+            if (rd_buf(buf, w, len) && !_wcsicmp(w, name)) return base;
+        }
+        cur = rdv<uintptr_t>(cur);
+    }
+    return 0;
 #endif
+}
+
+static DWORD find_pid() {
+    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (s == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W pe{ sizeof(pe) }; DWORD pid = 0;
+    if (Process32FirstW(s, &pe)) do {
+        if (!_wcsicmp(pe.szExeFile, L"ROB RUN.exe")) { pid = pe.th32ProcessID; break; }
+    } while (Process32NextW(s, &pe));
+    CloseHandle(s);
+    return pid;
 }
 
 static bool attach() {
 #if !ROBRUN_INTERNAL
-    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (s == INVALID_HANDLE_VALUE) return false;
-    PROCESSENTRY32W pe{ sizeof(pe) }; bool ok = false;
-    if (Process32FirstW(s, &pe)) do {
-        if (!_wcsicmp(pe.szExeFile, L"ROB RUN.exe")) { g_pid = pe.th32ProcessID; ok = true; break; }
-    } while (Process32NextW(s, &pe));
-    CloseHandle(s); if (!ok) return false;
-    g_proc = OpenProcess(PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_VM_OPERATION | PROCESS_QUERY_INFORMATION, FALSE, g_pid);
+    DWORD pid = find_pid();
+    if (!pid) return false;
+    g_proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ |
+                         PROCESS_VM_WRITE | PROCESS_VM_OPERATION, FALSE, pid);
     if (!g_proc) return false;
 #endif
     g_game = module_base(L"GameAssembly.dll");
@@ -171,10 +187,10 @@ static bool attach() {
     return g_game && g_unity;
 }
 
-// ------------------------------------------------------------- il2cpp
+// ---------------------------------------------------------------- il2cpp
 static bool class_is(uintptr_t obj, const char* want) {
     uintptr_t k = rdv<uintptr_t>(obj); if (!k) return false;
-    char b[64]{}; if (!vread(k + offs::KlassName, b, 63)) return false;
+    char b[64]{}; if (!rd_buf(k + offs::KlassName, b, 63)) return false;
     return strstr(b, want) != nullptr;
 }
 
@@ -232,16 +248,18 @@ template <class F> static void for_each_dict(uintptr_t d, F fn) {
 static std::string read_str(uintptr_t s) {
     int32_t l = rdv<int32_t>(s + 0x10); if (l <= 0 || l > 40) return {};
     std::wstring w(l, L'\0');
-    if (!vread(s + 0x14, &w[0], (size_t)l * 2)) return {};
+    if (!rd_buf(s + 0x14, &w[0], (size_t)l * 2)) return {};
     char b[96]{}; WideCharToMultiByte(CP_UTF8, 0, w.c_str(), l, b, 95, nullptr, nullptr);
     return b;
 }
 
-// ------------------------------------------------------------- state
+// ---------------------------------------------------------------- state
 struct State { uintptr_t updater{}, battle{}, entities{}, views{}, cam{}, world{}; };
 struct Ent { int id; std::string name; Vec3 pos; float dist; bool self; };
 struct World { Vec3 pos; float dist; int kind; };
 struct Cam { Vec3 pos; float yaw, pitch, fov; };
+
+static State g_st;
 
 static bool resolve(State& s) {
     for_each_go([&](uintptr_t go) { if (!s.updater) { uintptr_t c = find_component(go, "BattleEntitiesUpdater"); if (c) s.updater = c; } });
@@ -324,8 +342,6 @@ static bool camera(const State& s, std::vector<Ent>& ents, Cam& c) {
     return true;
 }
 
-static int g_w, g_h;
-
 static bool w2s(const Vec3& wp, const Cam& c, float& sx, float& sy) {
     float dx = wp.x - c.pos.x, dy = wp.y - c.pos.y, dz = wp.z - c.pos.z;
     float cy = cosf(-c.yaw), syw = sinf(-c.yaw);
@@ -361,7 +377,7 @@ static void do_aim(const State& s, const std::vector<Ent>& ents, const Cam& c) {
     }
 }
 
-// ------------------------------------------------------------- overlay
+// ---------------------------------------------------------------- overlay
 static HDC g_dc; static HBITMAP g_bmp; static HDC g_sdc;
 static const COLORREF KEY = RGB(1, 1, 1);
 
@@ -477,7 +493,7 @@ static void draw_menu(UI& ui, const State& st, size_t nent, size_t nworld, int f
     static int tab = 0;
     ui.begin(g_dc);
     ui.box(ui.px, ui.py, ui.pw, 470, RGB(16, 16, 21), RGB(60, 60, 72));
-    ui.text(ROBRUN_INTERNAL ? "ROB RUN  [internal]" : "ROB RUN  [external]", ui.px + 14, ui.py + 12, RGB(90, 240, 150), 17);
+    ui.text(ROBRUN_INTERNAL ? "ROB RUN [internal]" : "ROB RUN [external]", ui.px + 14, ui.py + 12, RGB(90, 240, 150), 16);
     ui.text("insert to close", ui.px + ui.pw - 116, ui.py + 15, RGB(110, 110, 125), 12);
 
     const char* tabs[] = { "VISUALS", "AIM", "MISC" };
@@ -524,102 +540,4 @@ static void draw_menu(UI& ui, const State& st, size_t nent, size_t nworld, int f
     }
     ui.end();
 
-    POINT p{}; GetCursorPos(&p);
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(120, 255, 170)); HGDIOBJ op = SelectObject(g_dc, pen);
-    MoveToEx(g_dc, p.x, p.y, nullptr); LineTo(g_dc, p.x + 11, p.y + 7);
-    LineTo(g_dc, p.x + 6, p.y + 8); LineTo(g_dc, p.x + 4, p.y + 15); LineTo(g_dc, p.x, p.y);
-    SelectObject(g_dc, op); DeleteObject(pen);
-}
-
-// ------------------------------------------------------------- entry
-static DWORD WINAPI run(LPVOID) {
-    SetProcessDPIAware();
-    load_cfg();
-    if (!attach()) return 1;
-
-    g_w = GetSystemMetrics(SM_CXSCREEN); g_h = GetSystemMetrics(SM_CYSCREEN);
-    WNDCLASSA wc{ 0 }; wc.lpfnWndProc = DefWindowProcA; wc.hInstance = g_self ? g_self : GetModuleHandleA(nullptr);
-    wc.lpszClassName = "rbov"; RegisterClassA(&wc);
-    HWND hwnd = CreateWindowExA(WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
-        "rbov", "robrun", WS_POPUP, 0, 0, g_w, g_h, nullptr, nullptr, wc.hInstance, nullptr);
-    if (!hwnd) return 1;
-    SetLayeredWindowAttributes(hwnd, KEY, 255, LWA_COLORKEY);
-    if (cfg.streamproof) SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
-    ShowWindow(hwnd, SW_SHOW);
-
-    g_sdc = GetDC(hwnd); g_dc = CreateCompatibleDC(g_sdc);
-    g_bmp = CreateCompatibleBitmap(g_sdc, g_w, g_h); SelectObject(g_dc, g_bmp);
-
-    State st; std::vector<Ent> ents; std::vector<World> world;
-    std::unordered_map<int, uintptr_t> views; Cam cam{};
-    auto last = std::chrono::steady_clock::now(), fpsT = last;
-    int frames = 0, fps = 0;
-    UI ui; bool lastMenu = false, lastStream = cfg.streamproof;
-
-    while (g_run) {
-        if (GetAsyncKeyState(VK_END) & 1) g_run = false;
-        if (GetAsyncKeyState(VK_INSERT) & 1) g_menu = !g_menu;
-
-        if (g_menu != lastMenu) {
-            LONG_PTR ex = GetWindowLongPtrA(hwnd, GWL_EXSTYLE);
-            ex = g_menu ? (ex & ~WS_EX_TRANSPARENT) | WS_EX_NOACTIVATE : ex | WS_EX_TRANSPARENT;
-            SetWindowLongPtrA(hwnd, GWL_EXSTYLE, ex);
-            if (g_menu) { ClipCursor(nullptr); ShowCursor(TRUE); } else ShowCursor(FALSE);
-            lastMenu = g_menu;
-        }
-        if (cfg.streamproof != lastStream) {
-            SetWindowDisplayAffinity(hwnd, cfg.streamproof ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE);
-            lastStream = cfg.streamproof;
-        }
-
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count() > 500) {
-            last = now;
-            if (!st.updater || !rdv<uintptr_t>(st.updater + offs::Updater_Entities)) { State f{}; resolve(f); st = f; }
-        }
-        if (++frames, std::chrono::duration_cast<std::chrono::milliseconds>(now - fpsT).count() > 500) {
-            fps = frames * 2; frames = 0; fpsT = now;
-        }
-
-        ents.clear(); views.clear(); world.clear();
-        bool ok = st.updater != 0;
-        if (ok) collect(st, ents, views);
-        bool camOk = ok && !ents.empty() && camera(st, ents, cam);
-        if (ok && cfg.esp) collect_world(st, world);
-        for (auto& w : world) {
-            float dx = w.pos.x - cam.pos.x, dy = w.pos.y - cam.pos.y, dz = w.pos.z - cam.pos.z;
-            w.dist = sqrtf(dx * dx + dy * dy + dz * dz);
-        }
-
-        PatBlt(g_dc, 0, 0, g_w, g_h, WHITENESS);
-        if (camOk) render(g_dc, ents, world, cam);
-        if (g_menu) draw_menu(ui, st, ents.size(), world.size(), fps);
-        BitBlt(g_sdc, 0, 0, g_w, g_h, g_dc, 0, 0, SRCCOPY);
-
-        if (camOk && !g_menu) do_aim(st, ents, cam);
-        Sleep(1);
-    }
-
-    save_cfg();
-#if !ROBRUN_INTERNAL
-    CloseHandle(g_proc);
-#endif
-    return 0;
-}
-
-#if ROBRUN_INTERNAL
-BOOL APIENTRY DllMain(HMODULE h, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_ATTACH) {
-        g_self = h; DisableThreadLibraryCalls(h);
-        CreateThread(nullptr, 0, run, nullptr, 0, nullptr);
-    }
-    return TRUE;
-}
-#else
-int WINAPI WinMain(HINSTANCE h, HINSTANCE, LPSTR, int) {
-    g_self = h;
-    if (!attach()) { MessageBoxA(nullptr, "ROB RUN.exe is not running.", "robrun", MB_ICONERROR); return 1; }
-    run(nullptr);
-    return 0;
-}
-#endif
+    POINT p{}; GetCursorPos(&p
